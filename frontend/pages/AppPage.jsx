@@ -11,6 +11,7 @@ const SAMPLE_DOCUMENT = `This rent agreement is valid for 11 months. If the tena
 export default function AppPage() {
   const [mode, setMode] = useState("paste");
   const [language, setLanguage] = useState("bilingual");
+  const [voiceLanguage, setVoiceLanguage] = useState("english");
   const [text, setText] = useState("");
   const [isListening, setIsListening] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
@@ -19,56 +20,78 @@ export default function AppPage() {
   const [error, setError] = useState("");
   const [isSpeechReady, setIsSpeechReady] = useState(false);
   const recognitionRef = useRef(null);
-  const ocrWorkersRef = useRef(new Map());
+  const processedResultIndexRef = useRef(0);
   const router = useRouter();
 
   const charCount = useMemo(() => text.trim().length, [text]);
 
   useEffect(() => {
     const Recognition = typeof window !== "undefined" ? window.SpeechRecognition || window.webkitSpeechRecognition : null;
-    setIsSpeechReady(Boolean(Recognition));
+    const canUseMic = typeof window !== "undefined" && Boolean(navigator?.mediaDevices?.getUserMedia);
+    setIsSpeechReady(Boolean(Recognition) || canUseMic);
   }, []);
 
-  useEffect(() => {
-    return () => {
-      const workers = [...ocrWorkersRef.current.values()];
-      workers.forEach((worker) => {
-        worker.terminate().catch(() => {});
-      });
-      ocrWorkersRef.current.clear();
-    };
-  }, []);
-
-  function startVoiceInput() {
+  async function startVoiceInput() {
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Recognition) {
-      setError("Voice input is not supported in this browser. Try Chrome on Android/Desktop.");
+      setError("Voice input is not supported in this browser. Use latest Chrome or Edge on HTTPS/localhost.");
       return;
     }
 
     setError("");
+    try {
+      if (navigator?.mediaDevices?.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((track) => track.stop());
+      }
+    } catch {
+      setError("Microphone permission is blocked. Please allow mic access in browser settings and try again.");
+      return;
+    }
+
+    recognitionRef.current?.stop();
     const recognition = new Recognition();
-    recognition.lang = language === "english" ? "en-IN" : "hi-IN";
+    recognition.lang = voiceLanguage === "hindi" ? "hi-IN" : "en-IN";
     recognition.continuous = true;
     recognition.interimResults = true;
+    processedResultIndexRef.current = 0;
 
     recognition.onstart = () => setIsListening(true);
-    recognition.onend = () => setIsListening(false);
+    recognition.onend = () => {
+      setIsListening(false);
+      processedResultIndexRef.current = 0;
+    };
     recognition.onerror = () => {
       setError("Microphone access failed. Please allow mic permissions and try again.");
       setIsListening(false);
+      processedResultIndexRef.current = 0;
     };
 
     recognition.onresult = (event) => {
-      let transcript = "";
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        transcript += event.results[i][0].transcript;
+      let finalTranscript = "";
+      const startIndex = Math.max(event.resultIndex, processedResultIndexRef.current);
+      for (let i = startIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        if (!result?.isFinal) {
+          continue;
+        }
+
+        finalTranscript += result[0]?.transcript || "";
+        processedResultIndexRef.current = i + 1;
       }
-      setText((prev) => `${prev} ${transcript}`.trim());
+
+      if (finalTranscript.trim()) {
+        setText((prev) => `${prev} ${finalTranscript}`.trim());
+      }
     };
 
     recognitionRef.current = recognition;
-    recognition.start();
+    try {
+      recognition.start();
+    } catch {
+      setError("Could not start voice input. Please retry once after allowing microphone access.");
+      setIsListening(false);
+    }
   }
 
   function stopVoiceInput() {
@@ -129,35 +152,90 @@ export default function AppPage() {
         }
 
         context.putImageData(imgData, 0, 0);
-        return canvas;
+
+        const cropStartY = Math.floor(height * 0.42);
+        const bodyHeight = Math.max(1, height - cropStartY);
+        const bodyCanvas = document.createElement("canvas");
+        bodyCanvas.width = width;
+        bodyCanvas.height = bodyHeight;
+
+        const bodyContext = bodyCanvas.getContext("2d", { willReadFrequently: true });
+        if (!bodyContext) {
+          throw new Error("Could not prepare body image canvas for OCR.");
+        }
+
+        bodyContext.drawImage(canvas, 0, cropStartY, width, bodyHeight, 0, 0, width, bodyHeight);
+
+        return { fullCanvas: canvas, bodyCanvas };
       } finally {
         URL.revokeObjectURL(objectUrl);
       }
     };
 
     const cleanExtractedText = (data) => {
+      const normalize = (line) =>
+        line
+          .replace(/[“”]/g, '"')
+          .replace(/[’`]/g, "'")
+          .replace(/[|¦]/g, "I")
+          .replace(/[~_=]{2,}/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+
       const isLikelyNoise = (line) => {
         const compact = line.replace(/\s+/g, "");
-        if (compact.length < 3) {
+        if (compact.length < 4) {
           return true;
         }
 
         const alphaNumCount = (compact.match(/[a-zA-Z0-9\u0900-\u097F]/g) || []).length;
         const ratio = alphaNumCount / compact.length;
-        if (ratio < 0.45) {
+        if (ratio < 0.55) {
+          return true;
+        }
+
+        const symbolCount = (compact.match(/[^a-zA-Z0-9\u0900-\u097F]/g) || []).length;
+        if (symbolCount / compact.length > 0.2) {
+          return true;
+        }
+
+        if (/^[A-Z]{2,6}$/.test(compact)) {
           return true;
         }
 
         return /(.)\1{5,}/.test(compact);
       };
 
-      const lineText = Array.isArray(data?.lines)
+      const lines = Array.isArray(data?.lines)
         ? data.lines
-            .map((line) => (line?.text || "").trim())
-            .filter((line) => line.length >= 2)
-            .filter((line) => !isLikelyNoise(line))
-            .join("\n")
-        : "";
+            .map((line) => ({
+              text: normalize((line?.text || "").trim()),
+              confidence: Number(line?.confidence ?? 0),
+            }))
+            .filter((line) => line.text.length >= 3)
+            .filter((line) => line.confidence >= 35)
+            .filter((line) => !isLikelyNoise(line.text))
+            .map((line) => line.text)
+        : [];
+
+      const anchorTerms = [
+        "residential rental agreement",
+        "this agreement",
+        "whereas",
+        "lessor",
+        "lessee",
+        "lease property",
+      ];
+
+      let anchoredLines = lines;
+      const anchorIndex = lines.findIndex((line) =>
+        anchorTerms.some((term) => line.toLowerCase().includes(term))
+      );
+      if (anchorIndex > 0) {
+        anchoredLines = lines.slice(anchorIndex);
+      }
+
+      const lineText = anchoredLines.join("\n");
 
       const words = Array.isArray(data?.words) ? data.words : [];
       const textByConfidence =
@@ -174,29 +252,41 @@ export default function AppPage() {
       const baseText = (lineText || textByConfidence || data?.text || "").replace(/\r/g, "");
       return baseText
         .split("\n")
-        .map((line) => line.trim())
+        .map((line) => normalize(line))
         .filter((line) => line.length >= 3)
         .filter((line) => /[a-zA-Z0-9\u0900-\u097F]/.test(line))
+        .filter((line) => !/^(india non judicial|twenty rupees|rs\.?\s*20|tamil nadu)$/i.test(line))
         .join("\n");
     };
 
-    const tryExtractWithLanguage = async (createWorker, lang, preprocessedCanvas) => {
-      const existingWorker = ocrWorkersRef.current.get(lang);
-      const worker = existingWorker || (await createWorker(lang));
-      if (!existingWorker) {
-        ocrWorkersRef.current.set(lang, worker);
+    const scoreExtractedText = (value) => {
+      if (!value) {
+        return 0;
       }
 
-      try {
-        const { data } = await worker.recognize(preprocessedCanvas);
-        return cleanExtractedText(data);
-      } catch (error) {
-        if (!existingWorker) {
-          await worker.terminate().catch(() => {});
-          ocrWorkersRef.current.delete(lang);
-        }
-        throw error;
+      const textLower = value.toLowerCase();
+      const keyHits = ["agreement", "lessor", "lessee", "whereas", "tenant", "landlord"].reduce(
+        (count, key) => (textLower.includes(key) ? count + 1 : count),
+        0
+      );
+
+      const usefulChars = (value.match(/[a-zA-Z0-9\u0900-\u097F]/g) || []).length;
+      const totalChars = Math.max(1, value.length);
+      const quality = usefulChars / totalChars;
+      return keyHits * 30 + value.length * 0.02 + quality * 100;
+    };
+
+    const tryExtractWithLanguage = async (tesseractModule, lang, canvases) => {
+      const candidates = [];
+      for (const source of [canvases.bodyCanvas, canvases.fullCanvas]) {
+        const { data } = await tesseractModule.recognize(source, lang);
+        const cleaned = cleanExtractedText(data);
+        candidates.push(cleaned);
       }
+
+      return candidates
+        .sort((a, b) => scoreExtractedText(b) - scoreExtractedText(a))
+        .find(Boolean);
     };
 
     try {
@@ -204,15 +294,15 @@ export default function AppPage() {
       setOcrNote("Reading image... this can take a few seconds.");
       setIsExtracting(true);
 
-      const { createWorker } = await import("tesseract.js");
-      const preprocessedCanvas = await preprocessImageForOcr(file);
+      const tesseractModule = await import("tesseract.js");
+      const preprocessedCanvases = await preprocessImageForOcr(file);
       const languageAttempts = language === "bilingual" ? ["eng", "eng+hin", "hin"] : language === "english" ? ["eng", "eng+hin"] : ["hin", "eng+hin", "eng"];
       let extracted = "";
 
       for (const attemptLanguage of languageAttempts) {
         try {
           setOcrNote(`Reading image... trying ${attemptLanguage.toUpperCase()}.`);
-          extracted = await tryExtractWithLanguage(createWorker, attemptLanguage, preprocessedCanvas);
+          extracted = await tryExtractWithLanguage(tesseractModule, attemptLanguage, preprocessedCanvases);
           if (extracted.length >= 20) {
             break;
           }
@@ -253,6 +343,12 @@ export default function AppPage() {
         body: JSON.stringify({
           documentText: text,
           language,
+          preferredOutputLanguage:
+            mode === "voice"
+              ? voiceLanguage
+              : language === "english"
+                ? "english"
+                : undefined,
         }),
       });
 
@@ -358,16 +454,38 @@ export default function AppPage() {
                   />
                 </label>
                 {mode === "voice" ? (
-                  <button
-                    type="button"
-                    onClick={isListening ? stopVoiceInput : startVoiceInput}
-                    disabled={!isSpeechReady}
-                    className={`rounded-xl px-4 py-2 text-sm font-semibold text-white ${
-                      isListening ? "bg-red-600" : "bg-[color:var(--saffron)]"
-                    } disabled:opacity-50`}
-                  >
-                    {isListening ? "Stop Mic" : "Start Mic"}
-                  </button>
+                  <>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setVoiceLanguage("english")}
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                          voiceLanguage === "english" ? "bg-[color:var(--navy)] text-white" : "bg-white text-[color:var(--navy)]"
+                        }`}
+                      >
+                        Voice: English
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setVoiceLanguage("hindi")}
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                          voiceLanguage === "hindi" ? "bg-[color:var(--navy)] text-white" : "bg-white text-[color:var(--navy)]"
+                        }`}
+                      >
+                        Voice: Hindi
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={isListening ? stopVoiceInput : startVoiceInput}
+                      className={`rounded-xl px-4 py-2 text-sm font-semibold text-white ${
+                        isListening ? "bg-red-600" : "bg-[color:var(--saffron)]"
+                      }`}
+                    >
+                      {isListening ? "Stop Mic" : "Start Mic"}
+                    </button>
+                  </>
                 ) : null}
                 <button
                   type="button"
@@ -391,6 +509,12 @@ export default function AppPage() {
             </div>
 
             {ocrNote ? <p className="mt-3 rounded-xl bg-amber-100 px-3 py-2 text-sm text-amber-800">{ocrNote}</p> : null}
+
+            {!isSpeechReady && mode === "voice" ? (
+              <p className="mt-3 rounded-xl bg-amber-100 px-3 py-2 text-sm text-amber-800">
+                Voice input works best on latest Chrome/Edge on HTTPS or localhost with microphone permission enabled.
+              </p>
+            ) : null}
 
             {error ? (
               <p className="mt-3 rounded-xl bg-red-100 px-3 py-2 text-sm text-red-700">{error}</p>
