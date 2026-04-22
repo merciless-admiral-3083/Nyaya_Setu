@@ -1,45 +1,36 @@
+import { buildRagContext } from "../../../backend/lib/rag";
+import { storeAnalysisRecord } from "../../../backend/lib/analysis-db";
+export const runtime = "nodejs";
 const ANTHROPIC_MODEL = "claude-3-5-sonnet-latest";
 const GEMINI_MODEL = "gemini-1.5-flash";
-import { buildRagContext } from "../../../lib/rag";
-
 function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
+return Math.max(min, Math.min(max, value));
 }
-
 function findRiskClauses(text) {
-  const lines = text
+const lines = text
     .split(/[\n.]/)
     .map((line) => line.trim())
     .filter(Boolean);
 
-  const riskyWords = [
-    "forfeit",
-    "penalty",
-    "termination",
-    "arbitration",
-    "non-compete",
-    "deduct",
-    "withhold",
-    "sole discretion",
-    "lock-in",
-    "liable",
-  ];
+const riskyWords = ["forfeit","penalty","termination",
+    "arbitration","non-compete","deduct",
+    "withhold","sole discretion","lock-in","liable",];
 
-  const matches = lines.filter((line) =>
+const matches = lines.filter((line) =>
     riskyWords.some((word) => line.toLowerCase().includes(word))
-  );
+);
 
-  const selected = matches.slice(0, 4);
-  if (selected.length > 0) {
+const selected = matches.slice(0, 4);
+  if(selected.length > 0){
     return selected;
   }
 
-  return lines.slice(0, Math.min(lines.length, 3));
+  return lines.slice(0, Math.min(lines.length,3));
 }
 
 function buildMock(documentText) {
   const clauses = findRiskClauses(documentText);
-  const riskScore = clamp(4 + clauses.length * 1.3, 1, 10);
+  const riskScore = clamp(4+clauses.length *1.3,1,10);
 
   return {
     riskScore: Number(riskScore.toFixed(1)),
@@ -48,8 +39,7 @@ function buildMock(documentText) {
       "This document contains clauses that can create financial or legal disadvantage if signed without edits.",
     summaryHi:
       "इस दस्तावेज़ में कुछ ऐसी शर्तें हैं जो बिना बदलाव के साइन करने पर नुकसान कर सकती हैं।",
-    actions: [
-      "Ask for written changes to one-sided penalty and termination clauses.",
+    actions: ["Ask for written changes to one-sided penalty and termination clauses.",
       "Get rent, salary, or liability obligations clarified in exact numbers.",
       "Do not sign until arbitration/jurisdiction and exit terms are fair.",
     ],
@@ -271,11 +261,26 @@ export async function POST(request) {
 
     const payload = geminiResult || anthropicResult || buildMock(documentText);
 
+    let storedAnalysis = null;
+    try {
+      storedAnalysis = await storeAnalysisRecord({
+        ...payload,
+        documentText,
+        documentPreview: documentText.slice(0, 400),
+        retrieval: rag.retrieval,
+        ragEnabled: rag.retrieval.length > 0,
+      });
+    } catch (error) {
+      console.error("Failed to persist analysis:", error);
+    }
+
     return Response.json({
       ...payload,
       documentPreview: documentText.slice(0, 400),
       retrieval: rag.retrieval,
       ragEnabled: rag.retrieval.length > 0,
+      analysisId: storedAnalysis?._id || null,
+      storedInMongo: Boolean(storedAnalysis),
     });
   } catch {
     return Response.json(

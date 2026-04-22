@@ -12,7 +12,12 @@ function getClientPromise() {
 
   if (!globalForMongo.__nyayasetuMongoClientPromise) {
     const client = new MongoClient(uri);
-    globalForMongo.__nyayasetuMongoClientPromise = client.connect();
+    globalForMongo.__nyayasetuMongoClientPromise = client.connect().catch((error) => {
+      // Reset cached promise so later requests can retry connection.
+      globalForMongo.__nyayasetuMongoClientPromise = undefined;
+      console.error("MongoDB connection failed:", error);
+      return null;
+    });
   }
 
   return globalForMongo.__nyayasetuMongoClientPromise;
@@ -25,5 +30,9 @@ export async function getDatabase() {
   }
 
   const client = await clientPromise;
+  if (!client) {
+    return null;
+  }
+
   return client.db(dbName);
 }
