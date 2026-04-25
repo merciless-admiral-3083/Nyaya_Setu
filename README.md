@@ -16,36 +16,36 @@ It can explain the text in English, Hindi, or Hinglish, point out clauses that l
 
 ```mermaid
 flowchart LR
-	 A[Visitor] --> B[Home page]
-	 B --> C[Analyzer page]
-	 C --> D[/api/analyze]
-	 D --> E{AI provider available?}
-	 E -->|Gemini| F[Gemini response]
-	 E -->|Anthropic| G[Claude response]
-	 E -->|No key / fallback| H[Mock analysis]
-	 F --> I[Save latest analysis]
-	 G --> I
-	 H --> I
-	 I --> J[MongoDB]
-	 I --> K[Results page]
-	 K --> L[Local storage / latest API]
+    A[Visitor] --> B[Home page]
+    B --> C[Analyzer page]
+    C --> D["/api/analyze"]
+    D --> E{AI provider available?}
+    E -->|Gemini| F[Gemini response]
+    E -->|Anthropic| G[Claude response]
+    E -->|No key / fallback| H[Mock analysis]
+    F --> I[Save latest analysis]
+    G --> I
+    H --> I
+    I --> J[MongoDB]
+    I --> K[Results page]
+    K --> L[Local storage / latest API]
 ```
 
 ```mermaid
 sequenceDiagram
-	 participant U as User
-	 participant UI as App UI
-	 participant API as /api/analyze
-	 participant AI as AI provider
-	 participant DB as MongoDB
+    participant U as User
+    participant UI as App UI
+    participant API as "/api/analyze"
+    participant AI as AI provider
+    participant DB as MongoDB
 
-	 U->>UI: Paste document and submit
-	 UI->>API: Send document text
-	 API->>AI: Ask for analysis
-	 AI-->>API: Risk score, clauses, summary
-	 API->>DB: Save the result
-	 API-->>UI: Return analysis payload
-	 UI-->>U: Show verdict and flagged clauses
+    U->>UI: Paste document and submit
+    UI->>API: Send document text
+    API->>AI: Ask for analysis
+    AI-->>API: Risk score, clauses, summary
+    API->>DB: Save the result
+    API-->>UI: Return analysis payload
+    UI-->>U: Show verdict and flagged clauses
 ```
 
 ## Project layout
